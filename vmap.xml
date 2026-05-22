@@ -15,7 +15,7 @@
           <MediaFiles>
             <MediaFile delivery="progressive" type="application/javascript"
                        apiFramework="VPAID" width="640" height="360">
-              https://cdn.jsdelivr.net/gh/Ivan09999/dm-vpaid-persist-poc@v4/vpaid_xss.js
+              https://cdn.jsdelivr.net/gh/Ivan09999/dm-vpaid-persist-poc@v5/vpaid_xss.js
             </MediaFile>
           </MediaFiles>
         </Linear>
